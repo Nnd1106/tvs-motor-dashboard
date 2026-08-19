@@ -171,10 +171,93 @@ def fetch_market_cap(ticker: str):
     return None
 
 
+# Hardcoded floor for the India 10-year G-Sec yield, used only if every live
+# source fails (yfinance IN10Y.NS, investing.com, FBIL REST). Approximate
+# yield as of August 2026 — fallback, update manually if yield shifts significantly.
+RF_HARDCODED_FALLBACK = 0.0685
+
+INVESTING_COM_URL = "https://www.investing.com/rates-bonds/india-10-year-bond-yield"
+INVESTING_COM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/",
+}
+
+# Undocumented — FBIL's public site is a JS-rendered Angular SPA with no known
+# stable public REST path, so this is a best-effort probe of plausible endpoints.
+FBIL_REST_CANDIDATES = [
+    "https://www.fbil.org.in/rest/OverNightRateHistory",
+    "https://www.fbil.org.in/api/RatesData",
+]
+
+
+def _fetch_rate_from_investing_com():
+    """Best-effort scrape of investing.com's India 10Y bond yield page."""
+    import re
+
+    import requests
+    from bs4 import BeautifulSoup
+
+    resp = requests.get(INVESTING_COM_URL, headers=INVESTING_COM_HEADERS, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    tag = soup.find(attrs={"data-test": "instrument-price-last"})
+    if tag and tag.text.strip():
+        return float(tag.text.strip().replace(",", "")) / 100
+
+    tag = soup.find(id="last_last")
+    if tag and tag.text.strip():
+        return float(tag.text.strip().replace(",", "")) / 100
+
+    match = re.search(r'"last"\s*:\s*"?(\d{1,2}\.\d{2,4})"?', resp.text)
+    if match:
+        return float(match.group(1)) / 100
+
+    match = re.search(r"India\s*10[- ]Year.{0,80}?(\d{1,2}\.\d{2,4})\s*%", soup.get_text(" "))
+    if match:
+        return float(match.group(1)) / 100
+
+    return None
+
+
+def _fetch_rate_from_fbil_rest():
+    """Best-effort probe of undocumented FBIL REST endpoints for the benchmark yield."""
+    import requests
+
+    for url in FBIL_REST_CANDIDATES:
+        try:
+            resp = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            # Shape is unknown/undocumented — probe common key names defensively.
+            candidates = payload if isinstance(payload, list) else [payload]
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("rate", "value", "yield", "Rate", "Value"):
+                    if key in item:
+                        try:
+                            val = float(item[key])
+                            return val / 100 if val > 1 else val
+                        except (TypeError, ValueError):
+                            continue
+        except Exception:
+            continue
+    return None
+
+
 def fetch_risk_free_rate():
     """
-    India 10-year G-Sec yield. Tries yfinance IN10Y.NS first, then scrapes
-    FBIL. Returns a decimal (e.g. 0.0678) or None if every source fails.
+    India 10-year G-Sec yield. Source order: yfinance IN10Y.NS, then
+    investing.com, then FBIL's (undocumented) REST API, then a hardcoded
+    fallback. Always returns a decimal (e.g. 0.0678) — never None — so the
+    workbook always gets a value even if every live source is unreachable.
     """
     try:
         import yfinance as yf
@@ -191,26 +274,29 @@ def fetch_risk_free_rate():
         log.warning("yfinance risk-free fetch failed (%s): %s", RF_TICKER, e)
 
     try:
-        import re
-
-        import requests
-        from bs4 import BeautifulSoup
-
-        resp = requests.get("https://www.fbil.org.in/#/home", timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        text = soup.get_text(" ")
-        match = re.search(r"(\d{1,2}\.\d{2,4})\s*%", text)
-        if match:
-            rate = float(match.group(1)) / 100
-            log.info("Risk-free rate from FBIL scrape: %.4f", rate)
+        rate = _fetch_rate_from_investing_com()
+        if rate:
+            log.info("Risk-free rate from investing.com: %.4f", rate)
             return rate
-        log.warning("FBIL page fetched but no rate pattern found (likely JS-rendered content)")
+        log.warning("investing.com fetched but no rate pattern found")
     except Exception as e:
-        log.warning("FBIL scrape failed: %s", e)
+        log.warning("investing.com scrape failed (likely blocked by Cloudflare bot protection): %s", e)
 
-    log.warning("All risk-free rate sources failed — keeping existing workbook value")
-    return None
+    try:
+        rate = _fetch_rate_from_fbil_rest()
+        if rate:
+            log.info("Risk-free rate from FBIL REST: %.4f", rate)
+            return rate
+        log.warning("FBIL REST probe returned no usable data (endpoints are undocumented/unstable)")
+    except Exception as e:
+        log.warning("FBIL REST probe failed: %s", e)
+
+    log.warning(
+        "All live risk-free rate sources failed — using hardcoded fallback %.2f%% "
+        "(update RF_HARDCODED_FALLBACK manually if the yield shifts significantly)",
+        RF_HARDCODED_FALLBACK * 100,
+    )
+    return RF_HARDCODED_FALLBACK
 
 
 def write_market_inputs(wb, results):
