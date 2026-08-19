@@ -30,6 +30,10 @@ SURFACE_2 = "#1A1F2B"
 TEXT_PRIMARY = "#E8EAED"
 TEXT_MUTED = "#9AA3B2"
 
+# Operating-case scenario -> badge CSS class (badge-buy=green, badge-hold=grey, badge-sell=red)
+SCENARIO_BADGE_CLASS = {"Bull": "badge-buy", "Base": "badge-hold", "Bear": "badge-sell"}
+SCENARIO_DISPLAY_ORDER = ["Bull", "Base", "Bear"]
+
 st.set_page_config(
     page_title="TVS Motor — Equity Research Dashboard",
     page_icon="\U0001F3CD",
@@ -116,11 +120,67 @@ if not isinstance(data, dict) or not data:
     st.error("data/outputs.json is empty or malformed. Re-run the pipeline to regenerate it.")
     st.stop()
 
+market_inputs = data.get("market_inputs", {}) or {}
+cmp_val = market_inputs.get("cmp")
+
+# Backward compatible with a pre-scenario outputs.json (flat structure, no
+# "scenarios" key) — treat the whole file as a single implicit Base scenario.
+scenarios = data.get("scenarios") or {"Base": data}
+scenario_order = [s for s in SCENARIO_DISPLAY_ORDER if s in scenarios] or list(scenarios.keys())
+default_active = data.get("active_scenario") or "Base"
+if scenario_order and default_active not in scenario_order:
+    default_active = scenario_order[0]
+
+# ---------------------------------------------------------------------------
+# Sidebar — scenario controls
+# ---------------------------------------------------------------------------
+st.sidebar.header("Scenario Controls")
+
+if scenario_order:
+    selected_scenario = st.sidebar.selectbox(
+        "Operating case",
+        scenario_order,
+        index=scenario_order.index(default_active),
+        key="operating_case_selector",
+        help="Switches every metric and chart below to that case's Excel-computed outputs.",
+    )
+else:
+    selected_scenario = default_active
+
+active = scenarios.get(selected_scenario) or {}
+
+st.sidebar.divider()
+
+scenario_switches = data.get("scenario_switches") or {}
+other_switches = {name: meta for name, meta in scenario_switches.items() if name != "Operating case"}
+if other_switches:
+    for name, meta in other_switches.items():
+        options = (meta or {}).get("valid_options") or []
+        current = (meta or {}).get("current_value")
+        if not options:
+            continue
+        try:
+            idx = options.index(current) if current in options else 0
+        except Exception:
+            idx = 0
+        st.sidebar.selectbox(name, options, index=idx, key=f"scenario_{name}")
+    st.sidebar.caption("These reflect the Base case pipeline run")
+else:
+    st.sidebar.info("No scenario switch data available in outputs.json.")
+
 # ---------------------------------------------------------------------------
 # A. Header
 # ---------------------------------------------------------------------------
-st.title("TVS Motor Company — Equity Research Dashboard")
-st.caption("NSE: TVSMOTOR · Sum-of-the-Parts · DCF · Relative Valuation · Monte Carlo")
+title_col, badge_col = st.columns([5, 1])
+with title_col:
+    st.title("TVS Motor Company — Equity Research Dashboard")
+    st.caption("NSE: TVSMOTOR · Sum-of-the-Parts · DCF · Relative Valuation · Monte Carlo")
+with badge_col:
+    badge_class = SCENARIO_BADGE_CLASS.get(selected_scenario, "badge-hold")
+    st.markdown(
+        f'<div class="badge {badge_class}" style="margin-top: 30px;">{selected_scenario.upper()} CASE</div>',
+        unsafe_allow_html=True,
+    )
 
 last_refreshed = data.get("last_refreshed")
 if last_refreshed:
@@ -138,14 +198,12 @@ else:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# B. Key metrics row
+# B. Key metrics row (from the selected scenario, except CMP which is shared)
 # ---------------------------------------------------------------------------
-market_inputs = data.get("market_inputs", {}) or {}
-cmp_val = market_inputs.get("cmp")
-concluded = data.get("concluded_value_per_share")
-upside = data.get("upside_pct")
-wacc = (data.get("cost_of_capital") or {}).get("wacc")
-recommendation = (data.get("recommendation") or "N/A")
+concluded = active.get("concluded_value_per_share")
+upside = active.get("upside_pct")
+wacc = (active.get("cost_of_capital") or {}).get("wacc")
+recommendation = active.get("recommendation") or "N/A"
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("CMP (₹)", format_inr(cmp_val) if cmp_val is not None else "N/A")
@@ -157,46 +215,22 @@ c3.metric(
 c4.metric("WACC", f"{wacc * 100:,.2f}%" if isinstance(wacc, (int, float)) else "N/A")
 
 rec_upper = str(recommendation).strip().upper()
-badge_class = "badge-hold"
+rec_badge_class = "badge-hold"
 if rec_upper == "BUY":
-    badge_class = "badge-buy"
+    rec_badge_class = "badge-buy"
 elif rec_upper == "SELL":
-    badge_class = "badge-sell"
+    rec_badge_class = "badge-sell"
 with c5:
-    st.markdown(f'<div class="badge {badge_class}">{rec_upper}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="badge {rec_badge_class}">{rec_upper}</div>', unsafe_allow_html=True)
     st.caption("Recommendation")
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# C. Sidebar — scenario controls
-# ---------------------------------------------------------------------------
-st.sidebar.header("Scenario Controls")
-scenario_switches = data.get("scenario_switches") or {}
-if scenario_switches:
-    for name, meta in scenario_switches.items():
-        options = (meta or {}).get("valid_options") or []
-        current = (meta or {}).get("current_value")
-        if not options:
-            continue
-        try:
-            idx = options.index(current) if current in options else 0
-        except Exception:
-            idx = 0
-        st.sidebar.selectbox(name, options, index=idx, key=f"scenario_{name}")
-else:
-    st.sidebar.info("No scenario switch data available in outputs.json.")
-
-st.sidebar.info(
-    "Scenario controls shown reflect the last pipeline run. To see updated "
-    "valuations, change inputs in the Excel model and re-run the pipeline."
-)
-
-# ---------------------------------------------------------------------------
 # D. SOTP waterfall
 # ---------------------------------------------------------------------------
 st.subheader("Sum-of-the-Parts Bridge (₹ per share)")
-sotp_legs = data.get("sotp_legs") or []
+sotp_legs = active.get("sotp_legs") or []
 if sotp_legs:
     names = [leg.get("name", "") for leg in sotp_legs]
     values = [leg.get("value_per_share") for leg in sotp_legs]
@@ -208,13 +242,6 @@ if sotp_legs:
 
     waterfall_x = names + ["SOTP Value / Share"]
     waterfall_y = clean_values + [total_val]
-
-    marker_colors = []
-    for t, v in zip(types, clean_values):
-        if t == "subtract" or (v is not None and v < 0):
-            marker_colors.append(RED)
-        else:
-            marker_colors.append(GREEN)
 
     fig = go.Figure(
         go.Waterfall(
@@ -245,7 +272,7 @@ else:
 # E. Football field
 # ---------------------------------------------------------------------------
 st.subheader("Valuation Football Field (₹ per share)")
-football_field = data.get("football_field") or []
+football_field = active.get("football_field") or []
 if football_field:
     methods = [f.get("methodology", "") for f in football_field]
     lows = [f.get("low") for f in football_field]
@@ -308,7 +335,7 @@ else:
 # F. Sensitivity heatmap
 # ---------------------------------------------------------------------------
 st.subheader("Implied Value per Share — WACC vs Terminal Growth Rate")
-sens = data.get("sensitivity_grid") or {}
+sens = active.get("sensitivity_grid") or {}
 wacc_values = sens.get("wacc_values") or []
 g_values = sens.get("g_values") or []
 matrix = sens.get("matrix") or []
@@ -360,7 +387,7 @@ else:
 # G. Monte Carlo distribution
 # ---------------------------------------------------------------------------
 st.subheader("Monte Carlo Simulation — Implied Share Price Distribution")
-mc = data.get("monte_carlo") or {}
+mc = active.get("monte_carlo") or {}
 raw_trials = mc.get("raw_trials")
 mean = mc.get("mean")
 std_dev = mc.get("std_dev")
@@ -414,7 +441,7 @@ else:
     st.info("No Monte Carlo data available.")
 
 # ---------------------------------------------------------------------------
-# H. Peer snapshot table
+# H. Peer snapshot table (shared across scenarios)
 # ---------------------------------------------------------------------------
 st.subheader("Peer Snapshot")
 peers = market_inputs.get("peers") or {}
@@ -452,7 +479,7 @@ else:
 # ---------------------------------------------------------------------------
 st.divider()
 st.markdown(
-    '<p class="footer-text">Built by Niranjan Desai · MBA Finance, NMIMS Bengaluru (Batch 16) '
-    "· Academic and illustrative only — not investment advice.</p>",
+    '<p class="footer-text">Built by Niranjan Desai · For illustrative purposes only '
+    "— not investment advice.</p>",
     unsafe_allow_html=True,
 )
