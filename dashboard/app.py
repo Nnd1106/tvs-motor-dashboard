@@ -313,7 +313,16 @@ wacc_values = sens.get("wacc_values") or []
 g_values = sens.get("g_values") or []
 matrix = sens.get("matrix") or []
 
-if wacc_values and g_values and matrix:
+sensitivity_valid = (
+    bool(wacc_values)
+    and bool(g_values)
+    and bool(matrix)
+    and all(v is not None for v in wacc_values)
+    and all(v is not None for v in g_values)
+    and all(v is not None for row in matrix for v in row)
+)
+
+if sensitivity_valid:
     matrix_arr = np.array(matrix, dtype=float)
     center = cmp_val if cmp_val is not None else float(np.nanmedian(matrix_arr))
     max_dev = max(abs(np.nanmax(matrix_arr) - center), abs(np.nanmin(matrix_arr) - center), 1e-6)
@@ -345,7 +354,7 @@ if wacc_values and g_values and matrix:
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("No sensitivity grid data available.")
+    st.info("Sensitivity data not available in this refresh")
 
 # ---------------------------------------------------------------------------
 # G. Monte Carlo distribution

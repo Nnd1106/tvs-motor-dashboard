@@ -366,12 +366,42 @@ def safe_get(ws, cell, default=None):
 
 
 def extract_outputs(results):
-    """Load the recalculated workbook with data_only=True and pull every output."""
+    """Load the recalculated workbook with data_only=True and pull every output.
+
+    LibreOffice's headless conversion doesn't always force a full formula
+    recalculation, and openpyxl itself drops cached formula results whenever a
+    formula-mode workbook is re-saved (write_market_inputs does exactly that).
+    Either way, a formula cell in the recalculated working copy can come back
+    None even though the pipeline ran cleanly. As a safety net, any cell that
+    reads None from the working copy falls back to the same cell's cached
+    value in the original, untouched source workbook — Excel pre-computes and
+    stores those values in the file itself, so they're non-None even without
+    LibreOffice, just not updated with today's live market inputs.
+    """
     try:
         wbv = openpyxl.load_workbook(WORKING_XLSX, data_only=True)
     except Exception as e:
         log.error("Could not open working workbook for extraction: %s", e)
         return None
+
+    wbv_fallback = None
+    try:
+        wbv_fallback = openpyxl.load_workbook(SOURCE_XLSX, data_only=True)
+    except Exception as e:
+        log.warning("Could not open source workbook for cached-value fallback: %s", e)
+
+    fallback_used = []
+
+    def get_cell(sheet_name, cell):
+        val = None
+        if sheet_name in wbv.sheetnames:
+            val = safe_get(wbv[sheet_name], cell)
+        if val is None and wbv_fallback is not None and sheet_name in wbv_fallback.sheetnames:
+            fallback_val = safe_get(wbv_fallback[sheet_name], cell)
+            if fallback_val is not None:
+                val = fallback_val
+                fallback_used.append(f"{sheet_name}!{cell}")
+        return val
 
     out = {}
     out["valuation_date"] = datetime.now().strftime("%Y-%m-%d")
@@ -391,20 +421,19 @@ def extract_outputs(results):
         },
     }
 
-    ke = safe_get(wbv[OUT_KE[0]], OUT_KE[1])
-    wacc = safe_get(wbv[OUT_WACC[0]], OUT_WACC[1])
-    terminal_g = safe_get(wbv[OUT_TERMINAL_G[0]], OUT_TERMINAL_G[1])
+    ke = get_cell(*OUT_KE)
+    wacc = get_cell(*OUT_WACC)
+    terminal_g = get_cell(*OUT_TERMINAL_G)
     out["cost_of_capital"] = {"ke": ke, "wacc": wacc, "terminal_g": terminal_g}
 
-    core_auto_ps = safe_get(wbv[OUT_CORE_AUTO_PS[0]], OUT_CORE_AUTO_PS[1])
-    tvs_credit_ps = safe_get(wbv[OUT_TVS_CREDIT_PS[0]], OUT_TVS_CREDIT_PS[1])
-    sotp_ps = safe_get(wbv[OUT_SOTP_PS[0]], OUT_SOTP_PS[1])
+    core_auto_ps = get_cell(*OUT_CORE_AUTO_PS)
+    tvs_credit_ps = get_cell(*OUT_TVS_CREDIT_PS)
+    sotp_ps = get_cell(*OUT_SOTP_PS)
 
-    sotp_ws = wbv[SOTP_SHEET]
-    shares_out = safe_get(sotp_ws, SOTP_SHARES_OUT)
-    core_auto_ev = safe_get(sotp_ws, SOTP_CORE_AUTO_EV)
-    net_debt = safe_get(sotp_ws, SOTP_NET_DEBT)
-    other_subs_ps = safe_get(sotp_ws, SOTP_OTHER_SUBS_PS)
+    shares_out = get_cell(SOTP_SHEET, SOTP_SHARES_OUT)
+    core_auto_ev = get_cell(SOTP_SHEET, SOTP_CORE_AUTO_EV)
+    net_debt = get_cell(SOTP_SHEET, SOTP_NET_DEBT)
+    other_subs_ps = get_cell(SOTP_SHEET, SOTP_OTHER_SUBS_PS)
 
     core_auto_ev_ps = (core_auto_ev / shares_out) if (core_auto_ev is not None and shares_out) else None
     net_debt_ps = (net_debt / shares_out) if (net_debt is not None and shares_out) else None
@@ -417,9 +446,9 @@ def extract_outputs(results):
         "net_debt_per_share": net_debt_ps,
     }
 
-    out["concluded_value_per_share"] = safe_get(wbv[OUT_CONCLUDED_PS[0]], OUT_CONCLUDED_PS[1])
-    out["upside_pct"] = safe_get(wbv[OUT_UPSIDE[0]], OUT_UPSIDE[1])
-    out["recommendation"] = safe_get(wbv[OUT_RECOMMENDATION[0]], OUT_RECOMMENDATION[1])
+    out["concluded_value_per_share"] = get_cell(*OUT_CONCLUDED_PS)
+    out["upside_pct"] = get_cell(*OUT_UPSIDE)
+    out["recommendation"] = get_cell(*OUT_RECOMMENDATION)
 
     # Scenario switches with their valid dropdown options
     wbf = None
@@ -442,32 +471,30 @@ def extract_outputs(results):
             log.warning("Could not read data validations: %s", e)
 
     for name, cell in SCENARIO_SWITCHES.items():
-        current_value = safe_get(wbv[SCENARIO_SHEET], cell)
+        current_value = get_cell(SCENARIO_SHEET, cell)
         options = dv_options.get(cell) or FALLBACK_OPTIONS.get(name, [])
         scenario_switches[name] = {"current_value": current_value, "valid_options": options}
     out["scenario_switches"] = scenario_switches
 
     # Sensitivity grid
-    sens_ws = wbv[SENS_SHEET]
-    wacc_values = [safe_get(sens_ws, c) for c in SENS_WACC_CELLS]
-    g_values = [safe_get(sens_ws, c) for c in SENS_G_CELLS]
+    wacc_values = [get_cell(SENS_SHEET, c) for c in SENS_WACC_CELLS]
+    g_values = [get_cell(SENS_SHEET, c) for c in SENS_G_CELLS]
     matrix = []
     for r in SENS_GRID_ROWS:
-        row_vals = [safe_get(sens_ws, f"{col}{r}") for col in SENS_GRID_COLS]
+        row_vals = [get_cell(SENS_SHEET, f"{col}{r}") for col in SENS_GRID_COLS]
         matrix.append(row_vals)
     out["sensitivity_grid"] = {"wacc_values": wacc_values, "g_values": g_values, "matrix": matrix}
 
     # Monte Carlo
-    mc_ws = wbv[MC_SHEET]
-    mean = safe_get(mc_ws, MC_MEAN)
-    std_dev = safe_get(mc_ws, MC_STD)
-    median = safe_get(mc_ws, MC_MEDIAN)
-    prob_above_cmp = safe_get(mc_ws, MC_PROB_ABOVE_CMP)
+    mean = get_cell(MC_SHEET, MC_MEAN)
+    std_dev = get_cell(MC_SHEET, MC_STD)
+    median = get_cell(MC_SHEET, MC_MEDIAN)
+    prob_above_cmp = get_cell(MC_SHEET, MC_PROB_ABOVE_CMP)
 
     trials = []
     try:
         for r in range(MC_TRIAL_FIRST_ROW, MC_TRIAL_LAST_ROW + 1):
-            v = safe_get(mc_ws, f"{MC_TRIAL_COL}{r}")
+            v = get_cell(MC_SHEET, f"{MC_TRIAL_COL}{r}")
             if v is not None:
                 trials.append(v)
     except Exception as e:
@@ -512,22 +539,28 @@ def extract_outputs(results):
     ]
 
     # Football field
-    ff_ws = wbv[SOTP_SHEET]
     football_field = []
     for methodology, row in FOOTBALL_FIELD_ROWS.items():
-        low = safe_get(ff_ws, f"C{row}")
-        mid = safe_get(ff_ws, f"D{row}")
-        high = safe_get(ff_ws, f"E{row}")
+        low = get_cell(SOTP_SHEET, f"C{row}")
+        mid = get_cell(SOTP_SHEET, f"D{row}")
+        high = get_cell(SOTP_SHEET, f"E{row}")
         football_field.append({"methodology": methodology, "low": low, "mid": mid, "high": high})
     out["football_field"] = football_field
 
     # Peer multiples for the snapshot table
-    peer_ws = wbv["Peer Comps"]
     for key, row in PEER_MULTIPLE_ROWS.items():
-        ev_ebitda = safe_get(peer_ws, f"C{row}")
-        pe = safe_get(peer_ws, f"D{row}")
+        ev_ebitda = get_cell("Peer Comps", f"C{row}")
+        pe = get_cell("Peer Comps", f"D{row}")
         out["market_inputs"]["peers"][key]["ev_ebitda"] = ev_ebitda
         out["market_inputs"]["peers"][key]["pe"] = pe
+
+    if fallback_used:
+        log.warning(
+            "%d cell(s) fell back to the original source workbook's cached values "
+            "(recalculated working copy returned None): %s",
+            len(fallback_used),
+            ", ".join(fallback_used[:10]) + (", ..." if len(fallback_used) > 10 else ""),
+        )
 
     return out
 
