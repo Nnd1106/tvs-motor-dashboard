@@ -1,0 +1,41 @@
+name: Daily Market Data Refresh
+
+on:
+  schedule:
+    - cron: "30 3 * * 1-5"  # 09:00 IST, Mon-Fri
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libreoffice
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run refresh pipeline
+        run: python pipeline/refresh.py
+
+      - name: Commit and push outputs.json if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/outputs.json
+          git diff --cached --quiet || git commit -m "chore: refresh $(date -u +%Y-%m-%d)"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,257 @@
+{
+  "valuation_date": "2026-08-19",
+  "last_refreshed": "2026-08-19T06:56:18.074719+00:00",
+  "market_inputs": {
+    "cmp": 4355.2998046875,
+    "rf_rate": null,
+    "peers": {
+      "bajaj_auto": {
+        "ticker": "BAJAJ-AUTO.NS",
+        "name": "Bajaj Auto",
+        "price": 11693.0,
+        "currency": "INR",
+        "ev_ebitda": null,
+        "pe": null
+      },
+      "hero_motocorp": {
+        "ticker": "HEROMOTOCO.NS",
+        "name": "Hero MotoCorp",
+        "price": 5714.0,
+        "currency": "INR",
+        "ev_ebitda": null,
+        "pe": null
+      },
+      "eicher_motors": {
+        "ticker": "EICHERMOT.NS",
+        "name": "Eicher Motors",
+        "price": 8051.0,
+        "currency": "INR",
+        "ev_ebitda": null,
+        "pe": null
+      }
+    }
+  },
+  "cost_of_capital": {
+    "ke": null,
+    "wacc": null,
+    "terminal_g": null
+  },
+  "sotp_breakdown": {
+    "core_auto_per_share": null,
+    "tvs_credit_per_share": null,
+    "sotp_per_share": null,
+    "other_subs_per_share": null,
+    "net_debt_per_share": null
+  },
+  "concluded_value_per_share": null,
+  "upside_pct": null,
+  "recommendation": null,
+  "scenario_switches": {
+    "Operating case": {
+      "current_value": "Base",
+      "valid_options": [
+        "Conservative",
+        "Base",
+        "Aggressive"
+      ]
+    },
+    "Terminal growth case": {
+      "current_value": "Base",
+      "valid_options": [
+        "Conservative",
+        "Base",
+        "Aggressive"
+      ]
+    },
+    "Beta basis": {
+      "current_value": "Average of both",
+      "valid_options": [
+        "Regression beta",
+        "Bottom-up relevered",
+        "Average of both"
+      ]
+    },
+    "WACC adjustment": {
+      "current_value": "As calculated",
+      "valid_options": [
+        "-100 bp",
+        "-50 bp",
+        "As calculated",
+        "+50 bp",
+        "+100 bp"
+      ]
+    },
+    "Commodity pass-through": {
+      "current_value": "Base - 70%",
+      "valid_options": [
+        "Weak - 40%",
+        "Base - 70%",
+        "Strong - 90%"
+      ]
+    },
+    "TVS Credit valuation method": {
+      "current_value": "Average of three",
+      "valid_options": [
+        "Average of three",
+        "Peer P/B only",
+        "Warranted P/B only",
+        "Transaction only"
+      ]
+    },
+    "Peer multiple basis": {
+      "current_value": "Peer median",
+      "valid_options": [
+        "Peer median",
+        "Peer mean",
+        "Peer low",
+        "Peer high"
+      ]
+    },
+    "SOTP weighting scheme": {
+      "current_value": "Balanced",
+      "valid_options": [
+        "DCF-led",
+        "Balanced",
+        "Market-led"
+      ]
+    },
+    "Monte Carlo volatility regime": {
+      "current_value": "Base",
+      "valid_options": [
+        "Low",
+        "Base",
+        "High"
+      ]
+    }
+  },
+  "sensitivity_grid": {
+    "wacc_values": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "g_values": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "matrix": [
+      [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    ]
+  },
+  "monte_carlo": {
+    "p10": null,
+    "p25": null,
+    "p50": null,
+    "p75": null,
+    "p90": null,
+    "mean": null,
+    "std_dev": null,
+    "prob_above_cmp": null,
+    "raw_trials": null
+  },
+  "sotp_legs": [
+    {
+      "name": "Core Automotive (EV)",
+      "value_per_share": null,
+      "type": "add"
+    },
+    {
+      "name": "Net Debt",
+      "value_per_share": null,
+      "type": "subtract"
+    },
+    {
+      "name": "TVS Credit (85.15%)",
+      "value_per_share": null,
+      "type": "add"
+    },
+    {
+      "name": "Other Subsidiaries",
+      "value_per_share": null,
+      "type": "add"
+    }
+  ],
+  "football_field": [
+    {
+      "methodology": "DCF - FCFF",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "DCF - FCFE",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "EV/EBITDA",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "P/E",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "Precedent Transactions",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "Asset-Based NAV",
+      "low": null,
+      "mid": null,
+      "high": null
+    },
+    {
+      "methodology": "DDM",
+      "low": null,
+      "mid": null,
+      "high": null
+    }
+  ]
+}

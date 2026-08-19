@@ -1,0 +1,5 @@
+TVS_Motor_Valuation_Model.xlsx
+model_working.xlsx
+__pycache__/
+*.pyc
+.env
