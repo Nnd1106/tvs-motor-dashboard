@@ -372,13 +372,22 @@ def _make_libreoffice_profile():
 
 
 def recalculate_with_libreoffice():
-    """Try to recalculate WORKING_XLSX in place via LibreOffice headless."""
+    """
+    Recalculate WORKING_XLSX via LibreOffice headless.
+
+    --convert-to refuses to write when the output path is identical to the
+    input path — it fails the internal save (Sfx "Write Code:12") but still
+    exits 0, so the file silently stays byte-for-byte unchanged while looking
+    like a success. Converting into a separate temp directory and moving the
+    result back to WORKING_XLSX avoids that in-place collision.
+    """
     soffice = shutil.which("soffice") or shutil.which("soffice.exe")
     if not soffice:
         log.warning("LibreOffice (soffice) not found on PATH — skipping recalculation, will read cached values")
         return False
 
     profile_dir = _make_libreoffice_profile()
+    out_dir = Path(tempfile.mkdtemp(prefix="lo_out_"))
     try:
         profile_uri = profile_dir.resolve().as_uri()
         result = subprocess.run(
@@ -392,7 +401,7 @@ def recalculate_with_libreoffice():
                 "--convert-to",
                 "xlsx",
                 "--outdir",
-                str(WORKING_XLSX.parent),
+                str(out_dir),
                 str(WORKING_XLSX),
             ],
             capture_output=True,
@@ -405,6 +414,13 @@ def recalculate_with_libreoffice():
         if result.returncode != 0:
             log.warning("LibreOffice recalculation returned code %s: %s", result.returncode, result.stderr[:500])
             return False
+
+        converted = out_dir / WORKING_XLSX.name
+        if not converted.exists():
+            log.warning("LibreOffice reported success but no output file appeared at %s", converted)
+            return False
+
+        shutil.move(str(converted), str(WORKING_XLSX))
         log.info("Recalculated workbook with LibreOffice headless")
         return True
     except Exception as e:
@@ -412,6 +428,7 @@ def recalculate_with_libreoffice():
         return False
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def safe_get(ws, cell, default=None):
