@@ -36,6 +36,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/outputs.json
           git diff --cached --quiet || git commit -m "chore: refresh $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
