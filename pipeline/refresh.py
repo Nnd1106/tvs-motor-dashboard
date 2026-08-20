@@ -15,6 +15,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -346,17 +347,46 @@ def write_operating_case(wb, excel_value):
     log.info("Wrote Operating case '%s' -> %s!%s", excel_value, sheet, cell)
 
 
+# LibreOffice's default policy for recalculating formulas loaded from a
+# "foreign" format (xlsx) is "prompt the user" — and headless mode can't show
+# a prompt, so by default it silently SKIPS recalculation and just passes
+# through whatever cached values were already in the file (which, since
+# openpyxl wipes cached values on save, means every formula cell comes back
+# blank). Forcing OOXMLRecalcMode/ODFRecalcMode to 2 ("Always") in a fresh,
+# isolated user profile makes it actually recalculate before saving.
+RECALC_ALWAYS_XCU = """<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="OOXMLRecalcMode" oor:op="fuse"><value>2</value></prop></item>
+ <item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="ODFRecalcMode" oor:op="fuse"><value>2</value></prop></item>
+</oor:items>
+"""
+
+
+def _make_libreoffice_profile():
+    """A fresh, isolated LibreOffice user profile with recalc-always preset (see RECALC_ALWAYS_XCU)."""
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo_profile_"))
+    user_dir = profile_dir / "user"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "registrymodifications.xcu").write_text(RECALC_ALWAYS_XCU, encoding="utf-8")
+    return profile_dir
+
+
 def recalculate_with_libreoffice():
     """Try to recalculate WORKING_XLSX in place via LibreOffice headless."""
     soffice = shutil.which("soffice") or shutil.which("soffice.exe")
     if not soffice:
         log.warning("LibreOffice (soffice) not found on PATH — skipping recalculation, will read cached values")
         return False
+
+    profile_dir = _make_libreoffice_profile()
     try:
+        profile_uri = profile_dir.resolve().as_uri()
         result = subprocess.run(
             [
                 soffice,
                 "--headless",
+                "--norestore",
+                f"-env:UserInstallation={profile_uri}",
                 "--calc",
                 "--infilter=Calc MS Excel 2007 XML",
                 "--convert-to",
@@ -377,6 +407,8 @@ def recalculate_with_libreoffice():
     except Exception as e:
         log.warning("LibreOffice recalculation failed: %s", e)
         return False
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def safe_get(ws, cell, default=None):
