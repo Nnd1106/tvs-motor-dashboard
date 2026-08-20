@@ -399,6 +399,9 @@ def recalculate_with_libreoffice():
             text=True,
             timeout=180,
         )
+        log.info("soffice stdout: %s", (result.stdout or "").strip()[:1000])
+        if (result.stderr or "").strip():
+            log.info("soffice stderr: %s", result.stderr.strip()[:1000])
         if result.returncode != 0:
             log.warning("LibreOffice recalculation returned code %s: %s", result.returncode, result.stderr[:500])
             return False
@@ -648,9 +651,24 @@ def run_scenario(label, excel_operating_value, results):
     except Exception as e:
         log.error("[%s] Failed to write inputs into workbook: %s", label, e)
 
+    pre_stat = WORKING_XLSX.stat()
+    log.info("[%s] pre-recalc: size=%d mtime=%.3f", label, pre_stat.st_size, pre_stat.st_mtime)
+
     recalculated = recalculate_with_libreoffice()
     if not recalculated:
         log.warning("[%s] Proceeding with cached formula values (LibreOffice unavailable)", label)
+
+    post_stat = WORKING_XLSX.stat()
+    log.info(
+        "[%s] post-recalc: size=%d mtime=%.3f (changed=%s)",
+        label, post_stat.st_size, post_stat.st_mtime, post_stat.st_mtime != pre_stat.st_mtime,
+    )
+    try:
+        probe_wb = openpyxl.load_workbook(WORKING_XLSX, data_only=True)
+        probe_val = probe_wb["Control Panel"]["C18"].value
+        log.info("[%s] direct probe Control Panel!C18 (data_only) = %r", label, probe_val)
+    except Exception as e:
+        log.warning("[%s] probe read failed: %s", label, e)
 
     wbv, get_cell, fallback_used = make_cell_getter(WORKING_XLSX, SOURCE_XLSX)
     if get_cell is None:
@@ -659,9 +677,11 @@ def run_scenario(label, excel_operating_value, results):
     scenario_outputs = extract_scenario_outputs(get_cell)
 
     if fallback_used:
+        non_trial_fallbacks = [c for c in fallback_used if not c.startswith(f"{MC_SHEET}!{MC_TRIAL_COL}")]
         note = (
             f"[{label}] {len(fallback_used)} cell(s) fell back to the source workbook's cached "
-            "values (recalculated working copy returned None)."
+            f"values ({len(fallback_used) - len(non_trial_fallbacks)} Monte Carlo trial cells, "
+            f"{len(non_trial_fallbacks)} other: {non_trial_fallbacks[:20]})."
         )
         if label != "Base":
             note += (
