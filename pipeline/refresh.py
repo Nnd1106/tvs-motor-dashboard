@@ -165,6 +165,34 @@ MC_TRIAL_LAST_ROW = 1030
 # Peer multiples — Peer Comps!C15:D17 (EV/EBITDA, P/E)
 PEER_MULTIPLE_ROWS = {"bajaj_auto": 15, "hero_motocorp": 16, "eicher_motors": 17}
 
+# Terminal growth case values — Control Panel!C36:C38, static regardless of
+# which scenario is active (verified via openpyxl: C36=Conservative=0.045,
+# C37=Base=0.055, C38=Aggressive=0.06). Dashboard label -> cell.
+TERMINAL_GROWTH_VALUE_CELLS = {"Bear": "C36", "Base": "C37", "Bull": "C38"}
+
+# Operating-case caption metrics — Revenue CAGR / terminal EBITDA margin / PAT
+# CAGR are NOT static cells (they move with the Operating case's RM%, capex%
+# and volume-growth-multiplier assumptions cascading through the forecast),
+# so they're extracted from the Income Statement sheet during each of the
+# three (op, Base, Base) runs, which are already fully recalculated. Verified
+# via openpyxl: Q = FY2026A column, AF = FY2031E column.
+INCOME_STMT_SHEET = "Income Statement"
+IS_REVENUE_FY26A = "Q7"
+IS_REVENUE_FY31E = "AF7"
+IS_EBITDA_MARGIN_FY31E = "AF19"
+IS_PAT_FY26A = "Q36"
+IS_PAT_FY31E = "AF36"
+
+# Tickers for the new market-data charts (fetched once, not per-scenario)
+RELATIVE_PERFORMANCE_TICKERS = {
+    "TVSMOTOR": "TVSMOTOR.NS",
+    "Bajaj Auto": "BAJAJ-AUTO.NS",
+    "Hero MotoCorp": "HEROMOTOCO.NS",
+    "Eicher Motors": "EICHERMOT.NS",
+    "Nifty Auto": "^NSEAUTO",
+}
+FUNDAMENTALS_TICKERS = ["TVSMOTOR.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", "EICHERMOT.NS"]
+
 
 def fetch_price(ticker: str):
     """Best-effort last price fetch via yfinance. Returns float or None."""
@@ -209,6 +237,124 @@ def fetch_market_cap(ticker: str):
     except Exception as e:
         log.warning("Market cap fetch failed for %s: %s", ticker, e)
     return None
+
+
+def fetch_price_history(ticker: str, period: str = "2y"):
+    """Daily closing price history as a list of {date, price} dicts, or None on failure."""
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist.empty:
+            log.warning("Price history: no data returned for %s", ticker)
+            return None
+        out = []
+        for idx, row in hist.iterrows():
+            try:
+                out.append({"date": idx.strftime("%Y-%m-%d"), "price": float(row["Close"])})
+            except Exception:
+                continue
+        return out or None
+    except Exception as e:
+        log.warning("Price history fetch failed for %s: %s", ticker, e)
+        return None
+
+
+def fetch_fundamentals(ticker: str):
+    """
+    Trailing P/E, EV/EBITDA, RoE%, revenue growth%, EBITDA margin% via
+    yfinance .info. Each field independently falls back to None — a single
+    missing metric never blocks the others.
+    """
+    result = {
+        "trailing_pe": None,
+        "ev_ebitda": None,
+        "roe_pct": None,
+        "revenue_growth_pct": None,
+        "ebitda_margin_pct": None,
+    }
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(ticker).info
+    except Exception as e:
+        log.warning("Fundamentals fetch failed for %s: %s", ticker, e)
+        return result
+
+    try:
+        v = info.get("trailingPE")
+        result["trailing_pe"] = float(v) if v is not None else None
+    except Exception:
+        pass
+    try:
+        v = info.get("enterpriseToEbitda")
+        result["ev_ebitda"] = float(v) if v is not None else None
+    except Exception:
+        pass
+    try:
+        v = info.get("returnOnEquity")
+        result["roe_pct"] = float(v) * 100 if v is not None else None
+    except Exception:
+        pass
+    try:
+        v = info.get("revenueGrowth")
+        result["revenue_growth_pct"] = float(v) * 100 if v is not None else None
+    except Exception:
+        pass
+    try:
+        v = info.get("ebitdaMargins")
+        result["ebitda_margin_pct"] = float(v) * 100 if v is not None else None
+    except Exception:
+        pass
+    return result
+
+
+def fetch_relative_performance(tickers_map, period: str = "6mo"):
+    """
+    tickers_map: {display_name: ticker}. Fetches period-history closes for
+    each, aligns on common trading dates (inner join — an index like Nifty
+    Auto can have a slightly different calendar than individual stocks), and
+    rebases each series to 100 at the first common date. Returns
+    {"dates": [...], display_name: [...], ...} — a ticker that fails to
+    fetch is simply absent from the result rather than failing the whole
+    thing, EXCEPT TVSMOTOR itself: if the anchor series fails, returns None
+    since there's nothing meaningful to chart.
+    """
+    try:
+        import pandas as pd
+        import yfinance as yf
+    except Exception as e:
+        log.warning("Relative performance: required packages unavailable: %s", e)
+        return None
+
+    closes = {}
+    for name, ticker in tickers_map.items():
+        try:
+            hist = yf.Ticker(ticker).history(period=period)
+            if hist.empty:
+                log.warning("Relative performance: no data for %s (%s)", name, ticker)
+                continue
+            closes[name] = hist["Close"]
+        except Exception as e:
+            log.warning("Relative performance fetch failed for %s (%s): %s", name, ticker, e)
+
+    if "TVSMOTOR" not in closes:
+        log.warning("Relative performance: TVSMOTOR itself failed to fetch — no chart data")
+        return None
+
+    try:
+        df = pd.DataFrame(closes).dropna()
+        if df.empty:
+            log.warning("Relative performance: no overlapping trading dates across tickers")
+            return None
+        rebased = df / df.iloc[0] * 100
+        result = {"dates": [d.strftime("%Y-%m-%d") for d in rebased.index]}
+        for name in rebased.columns:
+            result[name] = [round(float(v), 4) for v in rebased[name]]
+        return result
+    except Exception as e:
+        log.warning("Relative performance alignment/rebase failed: %s", e)
+        return None
 
 
 # Hardcoded floor for the India 10-year G-Sec yield, used only if every live
@@ -651,6 +797,46 @@ def extract_market_inputs(get_cell, results):
     return market_inputs
 
 
+def extract_operating_case_metrics(get_cell):
+    """
+    Revenue CAGR (FY2026A->FY2031E), terminal (FY2031E) EBITDA margin, and PAT
+    CAGR (FY2026A->FY2031E) for whichever Operating case this run's workbook
+    was recalculated under — these move with RM%/capex%/volume-growth
+    assumptions cascading through the forecast, so they're read from the
+    Income Statement of an already-recalculated run, not a static table.
+    """
+    revenue_fy26a = get_cell(INCOME_STMT_SHEET, IS_REVENUE_FY26A)
+    revenue_fy31e = get_cell(INCOME_STMT_SHEET, IS_REVENUE_FY31E)
+    revenue_cagr = None
+    if revenue_fy26a and revenue_fy31e and revenue_fy26a > 0:
+        try:
+            revenue_cagr = (revenue_fy31e / revenue_fy26a) ** (1 / 5) - 1
+        except Exception:
+            revenue_cagr = None
+
+    ebitda_margin_terminal = get_cell(INCOME_STMT_SHEET, IS_EBITDA_MARGIN_FY31E)
+
+    pat_fy26a = get_cell(INCOME_STMT_SHEET, IS_PAT_FY26A)
+    pat_fy31e = get_cell(INCOME_STMT_SHEET, IS_PAT_FY31E)
+    pat_cagr = None
+    if pat_fy26a and pat_fy31e and pat_fy26a > 0:
+        try:
+            pat_cagr = (pat_fy31e / pat_fy26a) ** (1 / 5) - 1
+        except Exception:
+            pat_cagr = None
+
+    return {
+        "revenue_cagr": revenue_cagr,
+        "ebitda_margin_terminal": ebitda_margin_terminal,
+        "pat_cagr": pat_cagr,
+    }
+
+
+def extract_terminal_growth_values(get_cell):
+    """Terminal growth rate (g) per case — static cells, Control Panel!C36:C38."""
+    return {label: get_cell(SCENARIO_SHEET, cell) for label, cell in TERMINAL_GROWTH_VALUE_CELLS.items()}
+
+
 def extract_scenario_switches(working_path, get_cell):
     """
     All 9 Control Panel switches with their valid dropdown options, read once
@@ -769,6 +955,20 @@ def main():
     results["rf_rate"] = fetch_risk_free_rate()
     fetch_status["India 10Y G-Sec (Rf)"] = results["rf_rate"] is not None
 
+    # Chart market data — fetched once (not per-scenario), same pattern as
+    # cmp/peers/rf_rate above.
+    log.info("--- Fetching chart market data (price history, fundamentals, relative performance) ---")
+    price_history = fetch_price_history(TVS_TICKER, period="2y")
+    fetch_status["TVSMOTOR 2Y price history"] = price_history is not None
+
+    peer_fundamentals = {}
+    for ticker in FUNDAMENTALS_TICKERS:
+        peer_fundamentals[ticker] = fetch_fundamentals(ticker)
+        fetch_status[f"{ticker} fundamentals"] = any(v is not None for v in peer_fundamentals[ticker].values())
+
+    relative_performance = fetch_relative_performance(RELATIVE_PERFORMANCE_TICKERS, period="6mo")
+    fetch_status["6M relative performance"] = relative_performance is not None
+
     # Bull/Base/Bear x Bull/Base/Bear x High/Base/Low = 27 combinations.
     # Base/Base/Base runs first so market_inputs/scenario_switches capture it.
     combos = [(op, tg, wacc) for op in LABEL_ORDER for tg in LABEL_ORDER for wacc in WACC_LABEL_ORDER]
@@ -779,6 +979,8 @@ def main():
     run_log = []  # (op, tg, wacc, concluded, recommendation, recalculated)
     market_inputs = None
     scenario_switches = None
+    operating_case_metrics = {}
+    terminal_growth_values = None
 
     for i, (op_label, tg_label, wacc_label) in enumerate(combos, start=1):
         scenario_outputs, get_cell, recalculated, fallback_used = run_scenario(
@@ -803,10 +1005,20 @@ def main():
             )
         )
 
+        # Income Statement doesn't depend on Terminal growth or WACC, only
+        # Operating case, so these three (op, Base, Base) runs are enough to
+        # cover all three Operating case captions.
+        if tg_label == "Base" and wacc_label == "Base" and op_label not in operating_case_metrics:
+            try:
+                operating_case_metrics[op_label] = extract_operating_case_metrics(get_cell)
+            except Exception as e:
+                log.warning("Could not extract operating_case_metrics for %s: %s", op_label, e)
+
         if market_inputs is None and (op_label, tg_label, wacc_label) == ("Base", "Base", "Base"):
             try:
                 market_inputs = extract_market_inputs(get_cell, results)
                 scenario_switches = extract_scenario_switches(WORKING_XLSX, get_cell)
+                terminal_growth_values = extract_terminal_growth_values(get_cell)
             except Exception as e:
                 log.warning("Could not extract market_inputs/scenario_switches from Base/Base/Base run: %s", e)
 
@@ -823,6 +1035,12 @@ def main():
         }
     if scenario_switches is None:
         scenario_switches = {}
+    if terminal_growth_values is None:
+        terminal_growth_values = {}
+
+    market_inputs["price_history"] = price_history
+    market_inputs["peer_fundamentals"] = peer_fundamentals
+    market_inputs["relative_performance"] = relative_performance
 
     outputs = {
         "valuation_date": datetime.now().strftime("%Y-%m-%d"),
@@ -830,6 +1048,8 @@ def main():
         "market_inputs": market_inputs,
         "scenario_switches": scenario_switches,
         "active_scenario": ACTIVE_SCENARIO_DEFAULT,
+        "operating_case_metrics": operating_case_metrics,
+        "terminal_growth_values": terminal_growth_values,
         "scenarios": scenarios,
     }
 

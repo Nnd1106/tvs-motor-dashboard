@@ -50,6 +50,17 @@ WACC_KEY_FROM_DISPLAY = {v: k for k, v in WACC_DISPLAY_LABEL.items()}
 WACC_BADGE_CLASS = {"High": "badge-sell", "Low": "badge-buy"}  # Base -> no badge shown
 WACC_BADGE_TEXT = {"High": "+50 BPS WACC", "Low": "-50 BPS WACC"}
 
+# Caption wording per dropdown option — the numbers plugged into these come
+# from outputs.json (operating_case_metrics / terminal_growth_values /
+# scenarios[...]cost_of_capital.wacc), never hardcoded here.
+OPERATING_CASE_CAPTION_PREFIX = {"Bull": "Aggressive", "Base": "Base", "Bear": "Conservative"}
+TERMINAL_GROWTH_CAPTION_PREFIX = {
+    "Bull": "Optimistic terminal growth",
+    "Base": "Normalised terminal growth",
+    "Bear": "Conservative terminal growth",
+}
+WACC_CAPTION_PREFIX = {"High": "Higher risk premium", "Base": "Model WACC", "Low": "Lower risk premium"}
+
 st.set_page_config(
     page_title="TVS Motor — Equity Research Dashboard",
     page_icon="\U0001F3CD",
@@ -153,15 +164,44 @@ default_op = active_default.get("operating_case", "Base")
 op_idx = OPERATING_CASE_OPTIONS.index(default_op) if default_op in OPERATING_CASE_OPTIONS else 1
 selected_op = st.sidebar.selectbox("Operating case", OPERATING_CASE_OPTIONS, index=op_idx, key="operating_case_selector")
 
+op_metrics = (data.get("operating_case_metrics") or {}).get(selected_op) or {}
+op_prefix = OPERATING_CASE_CAPTION_PREFIX.get(selected_op, selected_op)
+_rev_cagr = op_metrics.get("revenue_cagr")
+_ebitda_margin = op_metrics.get("ebitda_margin_terminal")
+if isinstance(_rev_cagr, (int, float)) and isinstance(_ebitda_margin, (int, float)):
+    st.sidebar.caption(f"{op_prefix}: Revenue CAGR ~{_rev_cagr * 100:.1f}%, EBITDA margin ~{_ebitda_margin * 100:.1f}%")
+else:
+    st.sidebar.caption(f"{op_prefix} case")
+
 default_tg = active_default.get("terminal_growth_case", "Base")
 tg_idx = TERMINAL_GROWTH_OPTIONS.index(default_tg) if default_tg in TERMINAL_GROWTH_OPTIONS else 1
 selected_tg = st.sidebar.selectbox("Terminal growth case", TERMINAL_GROWTH_OPTIONS, index=tg_idx, key="terminal_growth_selector")
+
+tg_prefix = TERMINAL_GROWTH_CAPTION_PREFIX.get(selected_tg, selected_tg)
+_g_val = (data.get("terminal_growth_values") or {}).get(selected_tg)
+if isinstance(_g_val, (int, float)):
+    st.sidebar.caption(f"{tg_prefix}: {_g_val * 100:.1f}% p.a.")
+else:
+    st.sidebar.caption(tg_prefix)
 
 default_wacc_key = active_default.get("wacc_adjustment", "Base")
 default_wacc_display = WACC_DISPLAY_LABEL.get(default_wacc_key, "As calculated")
 wacc_idx = WACC_DISPLAY_OPTIONS.index(default_wacc_display) if default_wacc_display in WACC_DISPLAY_OPTIONS else 1
 selected_wacc_display = st.sidebar.selectbox("WACC adjustment", WACC_DISPLAY_OPTIONS, index=wacc_idx, key="wacc_adjustment_selector")
 selected_wacc = WACC_KEY_FROM_DISPLAY.get(selected_wacc_display, selected_wacc_display)
+
+wacc_prefix = WACC_CAPTION_PREFIX.get(selected_wacc, selected_wacc)
+try:
+    _wacc_val = scenarios["Base"]["Base"][selected_wacc]["cost_of_capital"]["wacc"]
+except (KeyError, TypeError):
+    _wacc_val = None
+if isinstance(_wacc_val, (int, float)):
+    if selected_wacc == "Base":
+        st.sidebar.caption(f"{wacc_prefix}: {_wacc_val * 100:.2f}% (base case)")
+    else:
+        st.sidebar.caption(f"{wacc_prefix}: WACC ~{_wacc_val * 100:.2f}%")
+else:
+    st.sidebar.caption(wacc_prefix)
 
 active = None
 try:
@@ -452,6 +492,294 @@ if sample is not None and len(sample) > 0:
     m6.metric("Prob > CMP", f"{prob_above_cmp * 100:,.1f}%" if isinstance(prob_above_cmp, (int, float)) else "N/A")
 else:
     st.info("No Monte Carlo data available.")
+
+
+def get_concluded_value(op_label):
+    """Bull/Base/Bear concluded value at Terminal growth=Base, WACC=Base — the
+    three reference points used by the historical-price and comparison charts."""
+    try:
+        return scenarios[op_label]["Base"]["Base"].get("concluded_value_per_share")
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+bull_concluded = get_concluded_value("Bull")
+base_concluded = get_concluded_value("Base")
+bear_concluded = get_concluded_value("Bear")
+
+# ---------------------------------------------------------------------------
+# J. Historical price vs intrinsic value
+# ---------------------------------------------------------------------------
+st.subheader("TVSMOTOR — Historical Price vs Intrinsic Value (2 Years)")
+price_history = market_inputs.get("price_history")
+
+if price_history and isinstance(price_history, list):
+    hist_dates = [p.get("date") for p in price_history if p.get("date") and p.get("price") is not None]
+    hist_prices = [p.get("price") for p in price_history if p.get("date") and p.get("price") is not None]
+else:
+    hist_dates, hist_prices = [], []
+
+if hist_dates and hist_prices:
+    fig = go.Figure()
+
+    all_y = list(hist_prices) + [v for v in [bull_concluded, base_concluded, bear_concluded] if v is not None]
+    y_min, y_max = min(all_y), max(all_y)
+    pad = (y_max - y_min) * 0.08 if y_max > y_min else max(y_max * 0.1, 10)
+
+    if base_concluded is not None:
+        fig.add_hrect(y0=base_concluded, y1=y_max + pad, fillcolor=GREEN, opacity=0.06, line_width=0)
+        fig.add_hrect(y0=y_min - pad, y1=base_concluded, fillcolor=RED, opacity=0.06, line_width=0)
+
+    fig.add_trace(
+        go.Scatter(
+            x=hist_dates,
+            y=hist_prices,
+            mode="lines",
+            line=dict(color=BLUE, width=2),
+            name="TVSMOTOR",
+            hovertemplate="%{x}<br>₹%{y:,.2f}<extra></extra>",
+        )
+    )
+
+    for label, val, color in [("Bull", bull_concluded, GREEN), ("Base", base_concluded, MUTED), ("Bear", bear_concluded, RED)]:
+        if val is None:
+            continue
+        fig.add_hline(
+            y=val,
+            line_width=1.5,
+            line_dash="dash",
+            line_color=color,
+            annotation_text=f"{label} {format_inr(val)}",
+            annotation_position="right",
+            annotation_font_color=color,
+        )
+
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        fig.add_vline(
+            x=today_str,
+            line_width=1.5,
+            line_dash="dash",
+            line_color=TEXT_MUTED,
+            annotation_text="Today",
+            annotation_position="top",
+        )
+    except Exception:
+        pass
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        margin=dict(t=20, b=20, l=20, r=90),
+        height=440,
+        xaxis_title="Date",
+        yaxis_title="₹ per share",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Chart data not yet available — trigger a pipeline run")
+
+# ---------------------------------------------------------------------------
+# K. Scenario comparison bar chart
+# ---------------------------------------------------------------------------
+st.subheader("Concluded Intrinsic Value — Bull vs Base vs Bear")
+
+if any(v is not None for v in [bull_concluded, base_concluded, bear_concluded]):
+    bar_labels = ["Bull Case", "Base Case", "Bear Case"]
+    bar_values = [bull_concluded, base_concluded, bear_concluded]
+    bar_colors = [GREEN, MUTED, RED]
+
+    fig = go.Figure(
+        go.Bar(
+            x=bar_labels,
+            y=[v if v is not None else 0 for v in bar_values],
+            marker_color=bar_colors,
+            text=[format_inr(v) if v is not None else "N/A" for v in bar_values],
+            textposition="outside",
+            hovertemplate="%{x}<br>%{text}<extra></extra>",
+        )
+    )
+
+    for label, val in zip(bar_labels, bar_values):
+        if val is None or not cmp_val:
+            continue
+        pct = val / cmp_val - 1
+        word = "upside" if pct >= 0 else "downside"
+        color = GREEN if pct >= 0 else RED
+        fig.add_annotation(
+            x=label, y=0, yshift=-28, showarrow=False,
+            text=f"{pct * 100:+.1f}% {word}",
+            font=dict(color=color, size=12),
+        )
+
+    if cmp_val is not None:
+        fig.add_hline(
+            y=cmp_val, line_width=2, line_dash="dash", line_color=RED,
+            annotation_text=f"CMP ₹{cmp_val:,.0f}", annotation_position="top right",
+        )
+
+    max_val = max([v for v in bar_values if v is not None] + [cmp_val or 0] + [0])
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        margin=dict(t=20, b=60, l=20, r=20),
+        height=440,
+        yaxis_title="₹ per share",
+        yaxis_range=[0, max_val * 1.25 if max_val > 0 else 1],
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Chart data not yet available — trigger a pipeline run")
+
+# ---------------------------------------------------------------------------
+# L. Peer radar / spider chart
+# ---------------------------------------------------------------------------
+st.subheader("Competitive Positioning — TVS Motor vs Peers")
+
+RADAR_TICKER_NAMES = {
+    "TVSMOTOR.NS": "TVS Motor",
+    "BAJAJ-AUTO.NS": "Bajaj Auto",
+    "HEROMOTOCO.NS": "Hero MotoCorp",
+    "EICHERMOT.NS": "Eicher Motors",
+}
+RADAR_METRICS = [
+    ("trailing_pe", "P/E"),
+    ("ev_ebitda", "EV/EBITDA"),
+    ("roe_pct", "RoE %"),
+    ("revenue_growth_pct", "Revenue Growth %"),
+    ("ebitda_margin_pct", "EBITDA Margin %"),
+]
+RADAR_COLORS = {"TVS Motor": BLUE, "Bajaj Auto": "#F39C12", "Hero MotoCorp": GREEN, "Eicher Motors": "#9B59B6"}
+
+peer_fundamentals = market_inputs.get("peer_fundamentals") or {}
+raw_by_company = {}
+for ticker, name in RADAR_TICKER_NAMES.items():
+    d = peer_fundamentals.get(ticker) or {}
+    raw_by_company[name] = {m: d.get(m) for m, _ in RADAR_METRICS}
+
+# Some metrics (e.g. returnOnEquity) are absent from Yahoo Finance's data for
+# NSE-listed stocks entirely, not just spottily — requiring every one of the
+# 5 metrics per company would then blank the whole chart forever. Drop an
+# axis first if it has no data for ANY company, then require the remaining
+# (actually-available) metrics to be present for a company to be plotted.
+usable_metrics = [
+    (m, label) for m, label in RADAR_METRICS
+    if any(raw_by_company[name].get(m) is not None for name in raw_by_company)
+]
+included = [
+    name for name in raw_by_company
+    if usable_metrics and all(raw_by_company[name].get(m) is not None for m, _ in usable_metrics)
+]
+excluded = [name for name in raw_by_company if name not in included]
+
+if included and usable_metrics:
+    normalized = {name: {} for name in included}
+    for metric_key, _ in usable_metrics:
+        vals = [raw_by_company[name][metric_key] for name in included]
+        lo, hi = min(vals), max(vals)
+        for name in included:
+            v = raw_by_company[name][metric_key]
+            normalized[name][metric_key] = 50.0 if hi == lo else 100.0 * (v - lo) / (hi - lo)
+
+    metric_labels = [label for _, label in usable_metrics]
+    fig = go.Figure()
+    for name in ["TVS Motor", "Bajaj Auto", "Hero MotoCorp", "Eicher Motors"]:
+        if name not in included:
+            continue
+        r_vals = [normalized[name][m] for m, _ in usable_metrics]
+        actual_vals = [raw_by_company[name][m] for m, _ in usable_metrics]
+        r_closed = r_vals + [r_vals[0]]
+        theta_closed = metric_labels + [metric_labels[0]]
+        actual_closed = actual_vals + [actual_vals[0]]
+        is_tvs = name == "TVS Motor"
+        color = RADAR_COLORS[name]
+        fig.add_trace(
+            go.Scatterpolar(
+                r=r_closed,
+                theta=theta_closed,
+                name=name,
+                line=dict(color=color, width=2 if is_tvs else 1.5),
+                fill="toself" if is_tvs else None,
+                fillcolor="rgba(52,152,219,0.3)" if is_tvs else None,
+                customdata=actual_closed,
+                hovertemplate="%{theta}<br>Actual: %{customdata:.2f}<extra>" + name + "</extra>",
+            )
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=SURFACE,
+        polar=dict(
+            bgcolor=SURFACE,
+            radialaxis=dict(visible=True, range=[0, 100], gridcolor="#2A3040"),
+            angularaxis=dict(gridcolor="#2A3040"),
+        ),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="top", y=-0.1, xanchor="center", x=0.5),
+        margin=dict(t=40, b=40, l=60, r=60),
+        height=480,
+    )
+    if excluded:
+        st.caption(f"Excluded from chart (fundamentals unavailable): {', '.join(excluded)}")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Chart data not yet available — trigger a pipeline run")
+
+# ---------------------------------------------------------------------------
+# M. 6-month relative price performance
+# ---------------------------------------------------------------------------
+st.subheader("Price Performance — TVSMOTOR vs Peers vs Nifty Auto (6M)")
+
+relative_performance = market_inputs.get("relative_performance") or {}
+rel_dates = relative_performance.get("dates")
+
+if rel_dates and relative_performance.get("TVSMOTOR"):
+    series_style = {
+        "TVSMOTOR": {"color": BLUE, "width": 3, "dash": None},
+        "Nifty Auto": {"color": MUTED, "width": 2, "dash": "dash"},
+        "Bajaj Auto": {"color": "#F39C12", "width": 1.5, "dash": None},
+        "Hero MotoCorp": {"color": GREEN, "width": 1.5, "dash": None},
+        "Eicher Motors": {"color": "#9B59B6", "width": 1.5, "dash": None},
+    }
+    fig = go.Figure()
+    missing_series = []
+    for name, style in series_style.items():
+        vals = relative_performance.get(name)
+        if not vals:
+            if name != "TVSMOTOR":
+                missing_series.append(name)
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=rel_dates,
+                y=vals,
+                mode="lines",
+                name=name,
+                line=dict(color=style["color"], width=style["width"], dash=style["dash"]),
+                hovertemplate=f"{name}: " + "%{y:.1f}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=100, line_color=MUTED, line_width=1, opacity=0.6)
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=440,
+        xaxis_title="Date",
+        yaxis_title="Rebased to 100",
+        legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+        hovermode="x unified",
+    )
+    if missing_series:
+        st.caption(f"Not available this refresh: {', '.join(missing_series)}")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Chart data not yet available — trigger a pipeline run")
 
 # ---------------------------------------------------------------------------
 # H. Peer snapshot table (shared across scenarios)
