@@ -34,6 +34,22 @@ TEXT_MUTED = "#9AA3B2"
 SCENARIO_BADGE_CLASS = {"Bull": "badge-buy", "Base": "badge-hold", "Bear": "badge-sell"}
 SCENARIO_DISPLAY_ORDER = ["Bull", "Base", "Bear"]
 
+# WACC adjustment: internal key -> display label shown in the selectbox, and
+# the reverse lookup to translate the selectbox's choice back to a key.
+WACC_DISPLAY_ORDER = ["High", "Base", "Low"]
+WACC_DISPLAY_LABEL = {"High": "+50 bps", "Base": "As calculated", "Low": "-50 bps"}
+WACC_KEY_FROM_DISPLAY = {v: k for k, v in WACC_DISPLAY_LABEL.items()}
+WACC_BADGE_CLASS = {"High": "badge-sell", "Low": "badge-buy"}  # Base -> no badge shown
+WACC_BADGE_TEXT = {"High": "+50 BPS WACC", "Low": "-50 BPS WACC"}
+
+
+def ordered_keys(d, preferred_order):
+    """Keys of d (if it's a dict), in preferred_order where possible, falling back to insertion order."""
+    if not isinstance(d, dict) or not d:
+        return []
+    keys = list(d.keys())
+    return [k for k in preferred_order if k in keys] or keys
+
 st.set_page_config(
     page_title="TVS Motor — Equity Research Dashboard",
     page_icon="\U0001F3CD",
@@ -123,64 +139,85 @@ if not isinstance(data, dict) or not data:
 market_inputs = data.get("market_inputs", {}) or {}
 cmp_val = market_inputs.get("cmp")
 
-# Backward compatible with a pre-scenario outputs.json (flat structure, no
-# "scenarios" key) — treat the whole file as a single implicit Base scenario.
-scenarios = data.get("scenarios") or {"Base": data}
-scenario_order = [s for s in SCENARIO_DISPLAY_ORDER if s in scenarios] or list(scenarios.keys())
-default_active = data.get("active_scenario") or "Base"
-if scenario_order and default_active not in scenario_order:
-    default_active = scenario_order[0]
+scenarios = data.get("scenarios") or {}
+active_default = data.get("active_scenario") or {}
+if not isinstance(active_default, dict):
+    active_default = {}
 
 # ---------------------------------------------------------------------------
-# Sidebar — scenario controls
+# Sidebar — exactly three live controls
 # ---------------------------------------------------------------------------
 st.sidebar.header("Scenario Controls")
 
-if scenario_order:
-    selected_scenario = st.sidebar.selectbox(
-        "Operating case",
-        scenario_order,
-        index=scenario_order.index(default_active),
-        key="operating_case_selector",
-        help="Switches every metric and chart below to that case's Excel-computed outputs.",
-    )
+op_options = ordered_keys(scenarios, SCENARIO_DISPLAY_ORDER)
+if op_options:
+    default_op = active_default.get("operating_case", "Base")
+    op_idx = op_options.index(default_op) if default_op in op_options else 0
+    selected_op = st.sidebar.selectbox("Operating case", op_options, index=op_idx, key="operating_case_selector")
 else:
-    selected_scenario = default_active
+    selected_op = None
 
-active = scenarios.get(selected_scenario) or {}
-
-st.sidebar.divider()
-
-scenario_switches = data.get("scenario_switches") or {}
-other_switches = {name: meta for name, meta in scenario_switches.items() if name != "Operating case"}
-if other_switches:
-    for name, meta in other_switches.items():
-        options = (meta or {}).get("valid_options") or []
-        current = (meta or {}).get("current_value")
-        if not options:
-            continue
-        try:
-            idx = options.index(current) if current in options else 0
-        except Exception:
-            idx = 0
-        st.sidebar.selectbox(name, options, index=idx, key=f"scenario_{name}")
-    st.sidebar.caption("These reflect the Base case pipeline run")
+tg_options = ordered_keys(scenarios.get(selected_op) if selected_op else None, SCENARIO_DISPLAY_ORDER)
+if tg_options:
+    # If Operating case just changed and the previously-picked Terminal
+    # growth case isn't valid under the new branch, drop the stale widget
+    # state so Streamlit falls back to index= instead of erroring on an
+    # out-of-range persisted value.
+    if st.session_state.get("terminal_growth_selector") not in tg_options:
+        st.session_state.pop("terminal_growth_selector", None)
+    default_tg = active_default.get("terminal_growth_case", "Base")
+    tg_idx = tg_options.index(default_tg) if default_tg in tg_options else 0
+    selected_tg = st.sidebar.selectbox("Terminal growth case", tg_options, index=tg_idx, key="terminal_growth_selector")
 else:
-    st.sidebar.info("No scenario switch data available in outputs.json.")
+    selected_tg = None
+
+wacc_key_options = ordered_keys(
+    (scenarios.get(selected_op) or {}).get(selected_tg) if selected_op and selected_tg else None,
+    WACC_DISPLAY_ORDER,
+)
+wacc_display_options = [WACC_DISPLAY_LABEL.get(k, k) for k in wacc_key_options]
+if wacc_display_options:
+    if st.session_state.get("wacc_adjustment_selector") not in wacc_display_options:
+        st.session_state.pop("wacc_adjustment_selector", None)
+    default_wacc_key = active_default.get("wacc_adjustment", "Base")
+    default_wacc_display = WACC_DISPLAY_LABEL.get(default_wacc_key, default_wacc_key)
+    wacc_idx = wacc_display_options.index(default_wacc_display) if default_wacc_display in wacc_display_options else 0
+    selected_wacc_display = st.sidebar.selectbox("WACC adjustment", wacc_display_options, index=wacc_idx, key="wacc_adjustment_selector")
+    selected_wacc = WACC_KEY_FROM_DISPLAY.get(selected_wacc_display, selected_wacc_display)
+else:
+    selected_wacc = None
+
+active = None
+try:
+    active = scenarios[selected_op][selected_tg][selected_wacc]
+except (KeyError, TypeError):
+    active = None
+
+if active is None:
+    st.warning("This scenario combination is not yet available — trigger a pipeline run to populate it.")
+    active = {}
 
 # ---------------------------------------------------------------------------
 # A. Header
 # ---------------------------------------------------------------------------
-title_col, badge_col = st.columns([5, 1])
+title_col, badge_col, wacc_badge_col = st.columns([4, 1, 1])
 with title_col:
     st.title("TVS Motor Company — Equity Research Dashboard")
     st.caption("NSE: TVSMOTOR · Sum-of-the-Parts · DCF · Relative Valuation · Monte Carlo")
 with badge_col:
-    badge_class = SCENARIO_BADGE_CLASS.get(selected_scenario, "badge-hold")
-    st.markdown(
-        f'<div class="badge {badge_class}" style="margin-top: 30px;">{selected_scenario.upper()} CASE</div>',
-        unsafe_allow_html=True,
-    )
+    if selected_op:
+        badge_class = SCENARIO_BADGE_CLASS.get(selected_op, "badge-hold")
+        st.markdown(
+            f'<div class="badge {badge_class}" style="margin-top: 30px;">{selected_op.upper()} CASE</div>',
+            unsafe_allow_html=True,
+        )
+with wacc_badge_col:
+    if selected_wacc in WACC_BADGE_TEXT:
+        badge_class = WACC_BADGE_CLASS[selected_wacc]
+        st.markdown(
+            f'<div class="badge {badge_class}" style="margin-top: 30px;">{WACC_BADGE_TEXT[selected_wacc]}</div>',
+            unsafe_allow_html=True,
+        )
 
 last_refreshed = data.get("last_refreshed")
 if last_refreshed:

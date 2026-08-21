@@ -1,10 +1,11 @@
 """
 Daily refresh pipeline for the TVS Motor equity research dashboard.
 
-Fetches today's live market data once, then runs the valuation model three
-times — once per Operating case scenario (Bull/Base/Bear) — recalculating
-each with LibreOffice headless and extracting every downstream output into
-data/outputs.json for the Streamlit dashboard to read.
+Fetches today's live market data once, then runs the valuation model 27
+times — every combination of Operating case x Terminal growth case x WACC
+adjustment (3 x 3 x 3) — recalculating each with LibreOffice headless and
+extracting every downstream output into data/outputs.json for the Streamlit
+dashboard to read.
 
 Every external call (yfinance, web scrape, LibreOffice subprocess) is wrapped
 so that one failure never crashes the whole run.
@@ -30,7 +31,8 @@ WORKING_XLSX = ROOT / "model_working.xlsx"
 OUTPUTS_JSON = ROOT / "data" / "outputs.json"
 
 # ---------------------------------------------------------------------------
-# Cell map — from the Phase 1 openpyxl audit of TVS_Motor_Valuation_Model.xlsx
+# Cell map — from the Phase 1 openpyxl audit of TVS_Motor_Valuation_Model.xlsx,
+# re-verified directly against the workbook's data validations for this change.
 # ---------------------------------------------------------------------------
 
 # Market inputs written daily
@@ -44,18 +46,39 @@ PEER_CELLS = {
 TVS_TICKER = "TVSMOTOR.NS"
 RF_TICKER = "IN10Y.NS"
 
-# Operating case scenario switch — Control Panel!C7, dropdown values are
-# Conservative/Base/Aggressive in the workbook. The dashboard names these
-# Bear/Base/Bull (a more familiar equity-research vocabulary for the same
-# optimism ordering), so this maps the dashboard label to the literal string
-# that must be written into C7 to satisfy the cell's list data validation.
+# Three live-driven scenario switches — all on Control Panel, verified via
+# openpyxl against ws.data_validations.dataValidation:
+#   C7  Operating case          -> Conservative / Base / Aggressive
+#   C8  Terminal growth case    -> Conservative / Base / Aggressive
+#   C10 WACC adjustment         -> -100 bp / -50 bp / As calculated / +50 bp / +100 bp
+# The dashboard uses Bull/Base/Bear (Operating & Terminal growth) and
+# High/Base/Low (WACC) as friendlier equity-research labels for the same
+# underlying Excel dropdown values, so these dicts map dashboard label ->
+# literal Excel string that must be written to satisfy each cell's list
+# data validation. WACC adjustment intentionally uses only the +/-50bp
+# points, not the +/-100bp extremes.
 OPERATING_CASE_CELL = ("Control Panel", "C7")
-SCENARIO_LABEL_TO_EXCEL_VALUE = {
+TERMINAL_GROWTH_CELL = ("Control Panel", "C8")
+WACC_ADJUSTMENT_CELL = ("Control Panel", "C10")
+
+CASE_LABEL_TO_EXCEL_VALUE = {
     "Bull": "Aggressive",
     "Base": "Base",
     "Bear": "Conservative",
 }
-ACTIVE_SCENARIO_DEFAULT = "Base"
+WACC_LABEL_TO_EXCEL_VALUE = {
+    "High": "+50 bp",
+    "Base": "As calculated",
+    "Low": "-50 bp",
+}
+WACC_LABEL_DISPLAY = {
+    "High": "+50bps",
+    "Base": "As calculated",
+    "Low": "-50bps",
+}
+LABEL_ORDER = ["Bull", "Base", "Bear"]
+WACC_LABEL_ORDER = ["High", "Base", "Low"]
+ACTIVE_SCENARIO_DEFAULT = {"operating_case": "Base", "terminal_growth_case": "Base", "wacc_adjustment": "Base"}
 
 # Key outputs — all on Control Panel, "B. LIVE OUTPUT" block
 OUT_KE = ("Control Panel", "C18")
@@ -69,9 +92,10 @@ OUT_CMP = ("Control Panel", "C25")
 OUT_UPSIDE = ("Control Panel", "C26")
 OUT_RECOMMENDATION = ("Control Panel", "C27")
 
-# Scenario switches — Control Panel!C7:C15, each with a list data validation.
-# Operating case (C7) is handled specially (see above); the other eight stay
-# display-only, read once from the Base-case run.
+# All 9 scenario switches — Control Panel!C7:C15, each with a list data
+# validation. C7/C8/C10 are the three live-driven ones above; the remaining
+# six are recorded once (from the Bull=Base/Base/Base run) as metadata only —
+# the dashboard no longer renders them.
 SCENARIO_SWITCHES = {
     "Operating case": "C7",
     "Terminal growth case": "C8",
@@ -320,14 +344,12 @@ def write_market_inputs(wb, results):
     sheet, cell = CELL_CMP
     if results["cmp"] is not None:
         wb[sheet][cell] = results["cmp"]
-        log.info("Wrote CMP %.2f -> %s!%s", results["cmp"], sheet, cell)
     else:
         log.warning("CMP unavailable — leaving %s!%s unchanged", sheet, cell)
 
     sheet, cell = CELL_RF
     if results["rf_rate"] is not None:
         wb[sheet][cell] = results["rf_rate"]
-        log.info("Wrote Rf %.4f -> %s!%s", results["rf_rate"], sheet, cell)
     else:
         log.warning("Rf rate unavailable — leaving %s!%s unchanged", sheet, cell)
 
@@ -335,16 +357,23 @@ def write_market_inputs(wb, results):
         mc_cr = results["peers"][key]["market_cap_cr"]
         if mc_cr is not None:
             wb[meta["sheet"]][meta["cell"]] = mc_cr
-            log.info("Wrote %s market cap %.1f cr -> %s!%s", meta["name"], mc_cr, meta["sheet"], meta["cell"])
         else:
             log.warning("%s market cap unavailable — leaving %s!%s unchanged", meta["name"], meta["sheet"], meta["cell"])
 
 
 def write_operating_case(wb, excel_value):
-    """Write the Operating case dropdown value (Conservative/Base/Aggressive) into Control Panel!C7."""
     sheet, cell = OPERATING_CASE_CELL
     wb[sheet][cell] = excel_value
-    log.info("Wrote Operating case '%s' -> %s!%s", excel_value, sheet, cell)
+
+
+def write_terminal_growth_case(wb, excel_value):
+    sheet, cell = TERMINAL_GROWTH_CELL
+    wb[sheet][cell] = excel_value
+
+
+def write_wacc_adjustment(wb, excel_value):
+    sheet, cell = WACC_ADJUSTMENT_CELL
+    wb[sheet][cell] = excel_value
 
 
 # LibreOffice's default policy for recalculating formulas loaded from a
@@ -383,7 +412,6 @@ def recalculate_with_libreoffice():
     """
     soffice = shutil.which("soffice") or shutil.which("soffice.exe")
     if not soffice:
-        log.warning("LibreOffice (soffice) not found on PATH — skipping recalculation, will read cached values")
         return False
 
     profile_dir = _make_libreoffice_profile()
@@ -408,9 +436,6 @@ def recalculate_with_libreoffice():
             text=True,
             timeout=180,
         )
-        log.info("soffice stdout: %s", (result.stdout or "").strip()[:1000])
-        if (result.stderr or "").strip():
-            log.info("soffice stderr: %s", result.stderr.strip()[:1000])
         if result.returncode != 0:
             log.warning("LibreOffice recalculation returned code %s: %s", result.returncode, result.stderr[:500])
             return False
@@ -421,7 +446,6 @@ def recalculate_with_libreoffice():
             return False
 
         shutil.move(str(converted), str(WORKING_XLSX))
-        log.info("Recalculated workbook with LibreOffice headless")
         return True
     except Exception as e:
         log.warning("LibreOffice recalculation failed: %s", e)
@@ -444,8 +468,7 @@ def make_cell_getter(working_path, fallback_path):
     Open working_path (data_only=True) and fallback_path (data_only=True),
     returning (workbook, get_cell, fallback_used) where get_cell(sheet, cell)
     reads from working_path first and falls back to fallback_path's cached
-    value whenever the working copy comes back None — see extract_scenario_outputs
-    docstring for why that happens even on a clean run.
+    value whenever the working copy comes back None.
     """
     try:
         wbv = openpyxl.load_workbook(working_path, data_only=True)
@@ -463,13 +486,20 @@ def make_cell_getter(working_path, fallback_path):
 
     def get_cell(sheet_name, cell):
         val = None
-        if sheet_name in wbv.sheetnames:
-            val = safe_get(wbv[sheet_name], cell)
-        if val is None and wbv_fallback is not None and sheet_name in wbv_fallback.sheetnames:
-            fallback_val = safe_get(wbv_fallback[sheet_name], cell)
-            if fallback_val is not None:
-                val = fallback_val
-                fallback_used.append(f"{sheet_name}!{cell}")
+        try:
+            if sheet_name in wbv.sheetnames:
+                val = safe_get(wbv[sheet_name], cell)
+        except Exception:
+            val = None
+        if val is None and wbv_fallback is not None:
+            try:
+                if sheet_name in wbv_fallback.sheetnames:
+                    fallback_val = safe_get(wbv_fallback[sheet_name], cell)
+                    if fallback_val is not None:
+                        val = fallback_val
+                        fallback_used.append(f"{sheet_name}!{cell}")
+            except Exception:
+                pass
         return val
 
     return wbv, get_cell, fallback_used
@@ -477,17 +507,10 @@ def make_cell_getter(working_path, fallback_path):
 
 def extract_scenario_outputs(get_cell):
     """
-    Pull the per-scenario output block (concluded value, WACC, SOTP, football
-    field, sensitivity grid, Monte Carlo, ...) using an already-bound get_cell
-    closure from make_cell_getter(). Returns a dict shaped for
-    outputs.json["scenarios"][<label>].
-
-    LibreOffice's headless conversion doesn't always force a full formula
-    recalculation, and openpyxl itself drops cached formula results whenever a
-    formula-mode workbook is re-saved (write_market_inputs/write_operating_case
-    do exactly that). Either way, a formula cell in the recalculated working
-    copy can come back None even though the pipeline ran cleanly — get_cell
-    already covers that with the source-workbook cached-value fallback.
+    Pull the per-combination output block (concluded value, WACC, SOTP,
+    football field, sensitivity grid, Monte Carlo, ...) using an
+    already-bound get_cell closure from make_cell_getter(). Returns a dict
+    shaped for outputs.json["scenarios"][op][tg][wacc].
     """
     ke = get_cell(*OUT_KE)
     wacc = get_cell(*OUT_WACC)
@@ -527,7 +550,10 @@ def extract_scenario_outputs(get_cell):
         matrix.append(row_vals)
     sensitivity_grid = {"wacc_values": wacc_values, "g_values": g_values, "matrix": matrix}
 
-    # Monte Carlo
+    # Monte Carlo — percentiles only; raw trial arrays are dropped from the
+    # persisted JSON to keep it a sane size across 27 combinations (27,000
+    # numbers otherwise). The dashboard reconstructs a normal distribution
+    # from mean/std_dev for the histogram when raw_trials is absent.
     mean = get_cell(MC_SHEET, MC_MEAN)
     std_dev = get_cell(MC_SHEET, MC_STD)
     median = get_cell(MC_SHEET, MC_MEDIAN)
@@ -569,7 +595,7 @@ def extract_scenario_outputs(get_cell):
         "mean": mean,
         "std_dev": std_dev,
         "prob_above_cmp": prob_above_cmp,
-        "raw_trials": trials if trials else None,
+        "raw_trials": None,
     }
 
     # SOTP legs — ordered waterfall
@@ -605,7 +631,7 @@ def extract_scenario_outputs(get_cell):
 
 
 def extract_market_inputs(get_cell, results):
-    """Market inputs are shared across scenarios (peer multiples don't move with Operating case)."""
+    """Market inputs are shared across all 27 combinations (peer multiples don't move with them)."""
     market_inputs = {
         "cmp": results.get("cmp"),
         "rf_rate": results.get("rf_rate"),
@@ -627,10 +653,10 @@ def extract_market_inputs(get_cell, results):
 
 def extract_scenario_switches(working_path, get_cell):
     """
-    The 9 scenario switches with their valid dropdown options, read once from
-    the Base-case run. Operating case's current_value is reported as-is (the
-    literal Excel value from that run); the dashboard drives Operating case
-    itself via outputs.json["active_scenario"], not this block.
+    All 9 Control Panel switches with their valid dropdown options, read once
+    from the Bull=Base/Base/Base run — metadata only. The dashboard drives
+    Operating case, Terminal growth case and WACC adjustment itself via the
+    scenarios[op][tg][wacc] structure, not this block.
     """
     dv_options = {}
     try:
@@ -652,60 +678,70 @@ def extract_scenario_switches(working_path, get_cell):
     return scenario_switches
 
 
-def run_scenario(label, excel_operating_value, results):
+def run_scenario(op_label, tg_label, wacc_label, results, run_index, total_runs):
     """
-    Build a fresh working copy, write market inputs + this scenario's
-    Operating case value, recalculate, and extract its output block.
+    Build a fresh working copy FROM THE CLEAN ORIGINAL (never chained on a
+    previous run's copy), write market inputs plus this combination's three
+    switch values, recalculate, and extract its output block.
     Returns (scenario_outputs, get_cell, recalculated, fallback_used).
     """
+    op_excel = CASE_LABEL_TO_EXCEL_VALUE[op_label]
+    tg_excel = CASE_LABEL_TO_EXCEL_VALUE[tg_label]
+    wacc_excel = WACC_LABEL_TO_EXCEL_VALUE[wacc_label]
+
+    log.info(
+        "Running [%d/%d]: Operating=%s | Terminal g=%s | WACC=%s (%s)",
+        run_index, total_runs, op_label, tg_label, wacc_label, WACC_LABEL_DISPLAY[wacc_label],
+    )
+
     shutil.copy(SOURCE_XLSX, WORKING_XLSX)
 
     try:
         wb = openpyxl.load_workbook(WORKING_XLSX, keep_vba=False, data_only=False)
         write_market_inputs(wb, results)
-        write_operating_case(wb, excel_operating_value)
+        write_operating_case(wb, op_excel)
+        write_terminal_growth_case(wb, tg_excel)
+        write_wacc_adjustment(wb, wacc_excel)
         wb.save(WORKING_XLSX)
     except Exception as e:
-        log.error("[%s] Failed to write inputs into workbook: %s", label, e)
+        log.error(
+            "  [%s/%s/%s] Failed to write inputs into workbook: %s", op_label, tg_label, wacc_label, e
+        )
 
-    pre_stat = WORKING_XLSX.stat()
-    log.info("[%s] pre-recalc: size=%d mtime=%.3f", label, pre_stat.st_size, pre_stat.st_mtime)
-
-    recalculated = recalculate_with_libreoffice()
-    if not recalculated:
-        log.warning("[%s] Proceeding with cached formula values (LibreOffice unavailable)", label)
-
-    post_stat = WORKING_XLSX.stat()
-    log.info(
-        "[%s] post-recalc: size=%d mtime=%.3f (changed=%s)",
-        label, post_stat.st_size, post_stat.st_mtime, post_stat.st_mtime != pre_stat.st_mtime,
-    )
     try:
-        probe_wb = openpyxl.load_workbook(WORKING_XLSX, data_only=True)
-        probe_val = probe_wb["Control Panel"]["C18"].value
-        log.info("[%s] direct probe Control Panel!C18 (data_only) = %r", label, probe_val)
+        recalculated = recalculate_with_libreoffice()
     except Exception as e:
-        log.warning("[%s] probe read failed: %s", label, e)
+        log.warning("  LibreOffice call raised unexpectedly: %s", e)
+        recalculated = False
+    log.info("  LibreOffice recalc: %s", "OK" if recalculated else "SKIPPED (fallback)")
 
-    wbv, get_cell, fallback_used = make_cell_getter(WORKING_XLSX, SOURCE_XLSX)
+    try:
+        wbv, get_cell, fallback_used = make_cell_getter(WORKING_XLSX, SOURCE_XLSX)
+    except Exception as e:
+        log.error("  [%s/%s/%s] Extraction setup failed: %s", op_label, tg_label, wacc_label, e)
+        return None, None, recalculated, []
+
     if get_cell is None:
         return None, None, recalculated, []
 
-    scenario_outputs = extract_scenario_outputs(get_cell)
+    try:
+        scenario_outputs = extract_scenario_outputs(get_cell)
+    except Exception as e:
+        log.error("  [%s/%s/%s] Output extraction failed: %s", op_label, tg_label, wacc_label, e)
+        return None, None, recalculated, fallback_used
+
+    concluded = scenario_outputs.get("concluded_value_per_share")
+    rec = scenario_outputs.get("recommendation")
+    concluded_str = f"₹{concluded:,.2f}" if isinstance(concluded, (int, float)) else "N/A"
+    log.info("  Concluded value: %s | Recommendation: %s", concluded_str, rec or "N/A")
 
     if fallback_used:
-        non_trial_fallbacks = [c for c in fallback_used if not c.startswith(f"{MC_SHEET}!{MC_TRIAL_COL}")]
-        note = (
-            f"[{label}] {len(fallback_used)} cell(s) fell back to the source workbook's cached "
-            f"values ({len(fallback_used) - len(non_trial_fallbacks)} Monte Carlo trial cells, "
-            f"{len(non_trial_fallbacks)} other: {non_trial_fallbacks[:20]})."
-        )
-        if label != "Base":
-            note += (
-                " WARNING: the source workbook's cache reflects the Base case, so this scenario's "
-                "outputs may be indistinguishable from Base until LibreOffice recalculation succeeds."
+        non_trial = [c for c in fallback_used if not c.startswith(f"{MC_SHEET}!{MC_TRIAL_COL}")]
+        if non_trial:
+            log.warning(
+                "  %d non-trial cell(s) fell back to the source workbook's cached values: %s",
+                len(non_trial), non_trial[:15],
             )
-        log.warning(note)
 
     return scenario_outputs, get_cell, recalculated, fallback_used
 
@@ -733,32 +769,50 @@ def main():
     results["rf_rate"] = fetch_risk_free_rate()
     fetch_status["India 10Y G-Sec (Rf)"] = results["rf_rate"] is not None
 
+    # Bull/Base/Bear x Bull/Base/Bear x High/Base/Low = 27 combinations.
+    # Base/Base/Base runs first so market_inputs/scenario_switches capture it.
+    combos = [(op, tg, wacc) for op in LABEL_ORDER for tg in LABEL_ORDER for wacc in WACC_LABEL_ORDER]
+    combos.sort(key=lambda c: (c != ("Base", "Base", "Base"),))
+    total_runs = len(combos)
+
     scenarios = {}
-    scenario_recalc_status = {}
+    run_log = []  # (op, tg, wacc, concluded, recommendation, recalculated)
     market_inputs = None
     scenario_switches = None
 
-    # Base first so market_inputs/scenario_switches capture the Base-case run.
-    ordered_labels = ["Base", "Bull", "Bear"]
-    for label in ordered_labels:
-        excel_value = SCENARIO_LABEL_TO_EXCEL_VALUE[label]
-        log.info("--- Running scenario: %s (Operating case = %s) ---", label, excel_value)
-        scenario_outputs, get_cell, recalculated, fallback_used = run_scenario(label, excel_value, results)
-        scenario_recalc_status[label] = recalculated
+    for i, (op_label, tg_label, wacc_label) in enumerate(combos, start=1):
+        scenario_outputs, get_cell, recalculated, fallback_used = run_scenario(
+            op_label, tg_label, wacc_label, results, i, total_runs
+        )
 
         if scenario_outputs is None:
-            log.error("[%s] Extraction failed — scenario will be missing from outputs.json", label)
+            log.error(
+                "  [%s/%s/%s] Extraction failed — combination will be missing from outputs.json",
+                op_label, tg_label, wacc_label,
+            )
+            run_log.append((op_label, tg_label, wacc_label, None, None, recalculated))
             continue
 
-        scenarios[label] = scenario_outputs
+        scenarios.setdefault(op_label, {}).setdefault(tg_label, {})[wacc_label] = scenario_outputs
+        run_log.append(
+            (
+                op_label, tg_label, wacc_label,
+                scenario_outputs.get("concluded_value_per_share"),
+                scenario_outputs.get("recommendation"),
+                recalculated,
+            )
+        )
 
-        if label == "Base":
-            market_inputs = extract_market_inputs(get_cell, results)
-            scenario_switches = extract_scenario_switches(WORKING_XLSX, get_cell)
+        if market_inputs is None and (op_label, tg_label, wacc_label) == ("Base", "Base", "Base"):
+            try:
+                market_inputs = extract_market_inputs(get_cell, results)
+                scenario_switches = extract_scenario_switches(WORKING_XLSX, get_cell)
+            except Exception as e:
+                log.warning("Could not extract market_inputs/scenario_switches from Base/Base/Base run: %s", e)
 
     if market_inputs is None:
-        # Base run failed entirely — fall back to raw fetch results so the
-        # dashboard still has prices even without a valuation to show.
+        # Base/Base/Base run failed entirely — fall back to raw fetch results
+        # so the dashboard still has prices even without a valuation to show.
         market_inputs = {
             "cmp": results.get("cmp"),
             "rf_rate": results.get("rf_rate"),
@@ -787,17 +841,33 @@ def main():
     log.info("=== RUN SUMMARY ===")
     for label, ok in fetch_status.items():
         log.info("  %-30s %s", label, "OK" if ok else "FAILED (kept existing value)")
-    for label in ordered_labels:
-        recalculated = scenario_recalc_status.get(label, False)
-        log.info("  Scenario %-6s LibreOffice recalc: %s", label, "OK" if recalculated else "SKIPPED (used cached values)")
-    for label in ordered_labels:
-        sc = scenarios.get(label, {})
+
+    log.info("--- All %d combinations ---", total_runs)
+    log.info("  %-6s %-6s %-6s %-14s %-10s %s", "Op", "TermG", "WACC", "Concluded (Rs)", "Rec", "Recalc")
+    for op_label, tg_label, wacc_label, concluded, rec, recalculated in sorted(
+        run_log, key=lambda r: (LABEL_ORDER.index(r[0]), LABEL_ORDER.index(r[1]), WACC_LABEL_ORDER.index(r[2]))
+    ):
+        concluded_str = f"{concluded:,.2f}" if isinstance(concluded, (int, float)) else "N/A"
         log.info(
-            "  %-6s -> Concluded value/share (Rs): %s | Recommendation: %s",
-            label,
-            sc.get("concluded_value_per_share"),
-            sc.get("recommendation"),
+            "  %-6s %-6s %-6s %-14s %-10s %s",
+            op_label, tg_label, wacc_label, concluded_str, rec or "N/A",
+            "OK" if recalculated else "FALLBACK",
         )
+
+    succeeded = sum(len(scenarios.get(op, {}).get(tg, {})) for op in LABEL_ORDER for tg in LABEL_ORDER)
+    distinct_values = len(
+        {
+            scenarios[op][tg][wacc].get("concluded_value_per_share")
+            for op in scenarios
+            for tg in scenarios[op]
+            for wacc in scenarios[op][tg]
+            if scenarios[op][tg][wacc].get("concluded_value_per_share") is not None
+        }
+    )
+    log.info(
+        "=== %d/%d combinations populated, %d distinct concluded-value results ===",
+        succeeded, total_runs, distinct_values,
+    )
     log.info("=== Refresh complete ===")
 
 
