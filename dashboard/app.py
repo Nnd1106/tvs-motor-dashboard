@@ -32,23 +32,23 @@ TEXT_MUTED = "#9AA3B2"
 
 # Operating-case scenario -> badge CSS class (badge-buy=green, badge-hold=grey, badge-sell=red)
 SCENARIO_BADGE_CLASS = {"Bull": "badge-buy", "Base": "badge-hold", "Bear": "badge-sell"}
-SCENARIO_DISPLAY_ORDER = ["Bull", "Base", "Bear"]
+
+# The three sidebar controls use fixed option lists, not options derived from
+# outputs.json — dynamic derivation broke visibly (a leaf dict's own field
+# names like "concluded_value_per_share" leaking into the dropdown) whenever
+# a scenario branch didn't have the expected nested shape. Hardcoding is
+# deliberate: it can never show the wrong kind of value as an option.
+OPERATING_CASE_OPTIONS = ["Bull", "Base", "Bear"]
+TERMINAL_GROWTH_OPTIONS = ["Bull", "Base", "Bear"]
 
 # WACC adjustment: internal key -> display label shown in the selectbox, and
 # the reverse lookup to translate the selectbox's choice back to a key.
 WACC_DISPLAY_ORDER = ["High", "Base", "Low"]
 WACC_DISPLAY_LABEL = {"High": "+50 bps", "Base": "As calculated", "Low": "-50 bps"}
+WACC_DISPLAY_OPTIONS = [WACC_DISPLAY_LABEL[k] for k in WACC_DISPLAY_ORDER]
 WACC_KEY_FROM_DISPLAY = {v: k for k, v in WACC_DISPLAY_LABEL.items()}
 WACC_BADGE_CLASS = {"High": "badge-sell", "Low": "badge-buy"}  # Base -> no badge shown
 WACC_BADGE_TEXT = {"High": "+50 BPS WACC", "Low": "-50 BPS WACC"}
-
-
-def ordered_keys(d, preferred_order):
-    """Keys of d (if it's a dict), in preferred_order where possible, falling back to insertion order."""
-    if not isinstance(d, dict) or not d:
-        return []
-    keys = list(d.keys())
-    return [k for k in preferred_order if k in keys] or keys
 
 st.set_page_config(
     page_title="TVS Motor — Equity Research Dashboard",
@@ -149,43 +149,19 @@ if not isinstance(active_default, dict):
 # ---------------------------------------------------------------------------
 st.sidebar.header("Scenario Controls")
 
-op_options = ordered_keys(scenarios, SCENARIO_DISPLAY_ORDER)
-if op_options:
-    default_op = active_default.get("operating_case", "Base")
-    op_idx = op_options.index(default_op) if default_op in op_options else 0
-    selected_op = st.sidebar.selectbox("Operating case", op_options, index=op_idx, key="operating_case_selector")
-else:
-    selected_op = None
+default_op = active_default.get("operating_case", "Base")
+op_idx = OPERATING_CASE_OPTIONS.index(default_op) if default_op in OPERATING_CASE_OPTIONS else 1
+selected_op = st.sidebar.selectbox("Operating case", OPERATING_CASE_OPTIONS, index=op_idx, key="operating_case_selector")
 
-tg_options = ordered_keys(scenarios.get(selected_op) if selected_op else None, SCENARIO_DISPLAY_ORDER)
-if tg_options:
-    # If Operating case just changed and the previously-picked Terminal
-    # growth case isn't valid under the new branch, drop the stale widget
-    # state so Streamlit falls back to index= instead of erroring on an
-    # out-of-range persisted value.
-    if st.session_state.get("terminal_growth_selector") not in tg_options:
-        st.session_state.pop("terminal_growth_selector", None)
-    default_tg = active_default.get("terminal_growth_case", "Base")
-    tg_idx = tg_options.index(default_tg) if default_tg in tg_options else 0
-    selected_tg = st.sidebar.selectbox("Terminal growth case", tg_options, index=tg_idx, key="terminal_growth_selector")
-else:
-    selected_tg = None
+default_tg = active_default.get("terminal_growth_case", "Base")
+tg_idx = TERMINAL_GROWTH_OPTIONS.index(default_tg) if default_tg in TERMINAL_GROWTH_OPTIONS else 1
+selected_tg = st.sidebar.selectbox("Terminal growth case", TERMINAL_GROWTH_OPTIONS, index=tg_idx, key="terminal_growth_selector")
 
-wacc_key_options = ordered_keys(
-    (scenarios.get(selected_op) or {}).get(selected_tg) if selected_op and selected_tg else None,
-    WACC_DISPLAY_ORDER,
-)
-wacc_display_options = [WACC_DISPLAY_LABEL.get(k, k) for k in wacc_key_options]
-if wacc_display_options:
-    if st.session_state.get("wacc_adjustment_selector") not in wacc_display_options:
-        st.session_state.pop("wacc_adjustment_selector", None)
-    default_wacc_key = active_default.get("wacc_adjustment", "Base")
-    default_wacc_display = WACC_DISPLAY_LABEL.get(default_wacc_key, default_wacc_key)
-    wacc_idx = wacc_display_options.index(default_wacc_display) if default_wacc_display in wacc_display_options else 0
-    selected_wacc_display = st.sidebar.selectbox("WACC adjustment", wacc_display_options, index=wacc_idx, key="wacc_adjustment_selector")
-    selected_wacc = WACC_KEY_FROM_DISPLAY.get(selected_wacc_display, selected_wacc_display)
-else:
-    selected_wacc = None
+default_wacc_key = active_default.get("wacc_adjustment", "Base")
+default_wacc_display = WACC_DISPLAY_LABEL.get(default_wacc_key, "As calculated")
+wacc_idx = WACC_DISPLAY_OPTIONS.index(default_wacc_display) if default_wacc_display in WACC_DISPLAY_OPTIONS else 1
+selected_wacc_display = st.sidebar.selectbox("WACC adjustment", WACC_DISPLAY_OPTIONS, index=wacc_idx, key="wacc_adjustment_selector")
+selected_wacc = WACC_KEY_FROM_DISPLAY.get(selected_wacc_display, selected_wacc_display)
 
 active = None
 try:
