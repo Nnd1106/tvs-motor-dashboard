@@ -1,6 +1,6 @@
 {
-  "valuation_date": "2026-11-09",
-  "last_refreshed": "2026-11-09T12:02:20.271136+00:00",
+  "valuation_date": "2026-11-10",
+  "last_refreshed": "2026-11-10T11:37:29.109975+00:00",
   "market_inputs": {
     "cmp": 4505.89990234375,
     "rf_rate": 0.0685,
@@ -2010,29 +2010,29 @@
     ],
     "peer_fundamentals": {
       "TVSMOTOR.NS": {
-        "trailing_pe": 55.786804,
-        "ev_ebitda": 26.614,
+        "trailing_pe": 55.939163,
+        "ev_ebitda": 26.749,
         "roe_pct": 37.230000000000004,
         "revenue_growth_pct": 39.4,
         "ebitda_margin_pct": 14.027999999999999
       },
       "BAJAJ-AUTO.NS": {
         "trailing_pe": 23.419369,
-        "ev_ebitda": 17.333,
+        "ev_ebitda": 17.437,
         "roe_pct": 35.56,
         "revenue_growth_pct": 57.4,
         "ebitda_margin_pct": 22.434
       },
       "HEROMOTOCO.NS": {
         "trailing_pe": 18.056067,
-        "ev_ebitda": 13.921,
+        "ev_ebitda": 13.735,
         "roe_pct": 26.927,
         "revenue_growth_pct": 22.5,
         "ebitda_margin_pct": 13.600000000000001
       },
       "EICHERMOT.NS": {
         "trailing_pe": 36.302643,
-        "ev_ebitda": 35.42,
+        "ev_ebitda": 35.315,
         "roe_pct": null,
         "revenue_growth_pct": 31.5,
         "ebitda_margin_pct": 23.195
